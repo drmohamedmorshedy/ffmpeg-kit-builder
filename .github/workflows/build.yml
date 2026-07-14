@@ -1,0 +1,38 @@
+name: Build ffmpeg-kit 16KB AAR
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: arthenica/ffmpeg-kit
+
+      - name: Install deps
+        run: |
+          sudo apt update && sudo apt install -y autoconf automake libtool pkg-config curl git doxygen nasm \
+            cmake gcc gperf texinfo yasm bison autogen wget autopoint meson ninja \
+            ragel groff gtk-doc-tools libtasn1-6-dev
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27
+
+      - name: Build
+        run: |
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}
+          ./android.sh --disable-arm-v7a --disable-arm-v7a-neon --disable-x86 --disable-x86-64 \
+            --enable-android-media-codec --enable-android-zlib --enable-dav1d --enable-fontconfig \
+            --enable-freetype --enable-fribidi --enable-kvazaar --enable-libass --enable-libiconv \
+            --enable-libilbc --enable-libtheora --enable-libvorbis --enable-libvpx --enable-libwebp \
+            --enable-libxml2 --enable-opencore-amr --enable-opus --enable-shine --enable-snappy \
+            --enable-soxr --enable-speex --enable-twolame --enable-vo-amrwbenc --enable-zimg \
+            --enable-gmp --enable-gnutls --enable-lame
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-kit-aar
+          path: "**/*.aar"
