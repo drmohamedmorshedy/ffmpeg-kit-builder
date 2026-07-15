@@ -118,6 +118,16 @@ jobs:
           echo "----- last 300 lines of build.log -----"
           tail -n 300 build.log || echo "build.log not found"
 
+      - name: Show tail of build_console.log on failure
+        if: failure()
+        run: |
+          # build.log only captures the per-library configure/make output.
+          # The final ndk-build phase that compiles ffmpeg-kit's own JNI
+          # wrapper (libffmpegkit.so / libffmpegkit_abidetect.so) runs outside
+          # that logging path, so its actual error only shows up here.
+          echo "----- last 300 lines of build_console.log -----"
+          tail -n 300 build_console.log || echo "build_console.log not found"
+
       - name: Locate AAR output
         if: success()
         run: |
@@ -137,6 +147,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            build_console.log
           if-no-files-found: ignore
 
