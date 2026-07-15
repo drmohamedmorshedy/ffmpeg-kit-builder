@@ -120,18 +120,23 @@ jobs:
         run: |
           set -euo pipefail
           FILE=scripts/android/ffmpeg.sh
-          # Target the actual unquoted initialization used by v6.0, not a
-          # quoted-assignment pattern that this version does not contain.
-          PATTERN='export LDFLAGS=\$(get_ldflags "\${LIB_NAME}")'
-          PRE_MATCHES=$(grep -cE "^${PATTERN}\$" "$FILE" || true)
+          # v6.0 declares this as a quoted assignment:
+          #   export LDFLAGS="$(get_ldflags "${LIB_NAME}")"
+          # An earlier version of this patch assumed an unquoted form that
+          # does not exist in this source tree (0 pre-patch matches), which
+          # made the step fail closed as designed. Anchor on the stable
+          # get_ldflags "${LIB_NAME}" substring inside the LDFLAGS export so
+          # the match survives incidental quoting differences, and keep the
+          # match count assertion so an unexpected shape still fails the job.
+          PRE_MATCHES=$(grep -cE '^export LDFLAGS="?\$\(get_ldflags "\$\{LIB_NAME\}"\)"?$' "$FILE" || true)
           if [ "$PRE_MATCHES" -ne 1 ]; then
-            echo "ERROR: expected exactly 1 pre-patch match for unquoted LDFLAGS export in $FILE, found $PRE_MATCHES."
+            echo "ERROR: expected exactly 1 pre-patch match for the LDFLAGS export in $FILE, found $PRE_MATCHES."
             exit 1
           fi
 
-          sed -i -E 's/^export LDFLAGS=\$\(get_ldflags "\$\{LIB_NAME\}"\)$/export LDFLAGS=$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384/' "$FILE"
+          sed -i -E 's/^export LDFLAGS="?\$\(get_ldflags "\$\{LIB_NAME\}"\)"?$/export LDFLAGS="$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"/' "$FILE"
 
-          POST_MATCHES=$(grep -cE 'export LDFLAGS=\$\(get_ldflags "\$\{LIB_NAME\}"\) -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384' "$FILE" || true)
+          POST_MATCHES=$(grep -cF 'export LDFLAGS="$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"' "$FILE" || true)
           echo "----- Patched ffmpeg.sh (grep check) -----"
           grep -n "LDFLAGS=" "$FILE" || true
           if [ "$POST_MATCHES" -ne 1 ]; then
