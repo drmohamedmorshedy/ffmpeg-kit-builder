@@ -44,7 +44,7 @@ jobs:
 
       - name: Install Android SDK cmdline-tools and NDK r27d (self-managed, no third-party SDK/NDK actions)
         run: |
-          set -e
+          set -euo pipefail
           export ANDROID_SDK_ROOT="$HOME/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           cd "$ANDROID_SDK_ROOT/cmdline-tools"
