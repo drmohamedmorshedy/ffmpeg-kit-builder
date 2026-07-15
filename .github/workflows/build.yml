@@ -143,6 +143,26 @@ jobs:
           cat "$WRAPPER"
           echo "VPX_CXX_WRAPPER_DIR=$HOME/vpx-cxx-wrapper" >> "$GITHUB_ENV"
 
+      - name: Create writable /usr/local/lib for SRT's hardcoded install prefix
+        run: |
+          # SRT's CMake build defaults CMAKE_INSTALL_PREFIX to /usr/local
+          # and its own "make install" step (triggered internally by
+          # android.sh's SRT build) tries to copy libsrt.so.<ver> there.
+          # The runner user can't write to /usr/local/lib by default, so
+          # this fails with:
+          #   CMake Error at cmake_install.cmake:57 (file):
+          #     file INSTALL cannot copy file ".../libsrt.so.1.5.2"
+          #     to "/usr/local/lib/libsrt.so.1.5.2": Permission denied.
+          # even though libsrt.a/libsrt.so themselves already built and
+          # linked successfully just before this step.
+          #
+          # sudo is available and passwordless on GitHub-hosted ubuntu-24.04
+          # runners, so just make the directory SRT actually targets
+          # writable rather than chasing CMAKE_INSTALL_PREFIX propagation
+          # through android.sh/SRT's CMakeLists.
+          sudo mkdir -p /usr/local/lib
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib
+
       - name: Build ffmpeg-kit (full minus libass/fontconfig, non-GPL, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
