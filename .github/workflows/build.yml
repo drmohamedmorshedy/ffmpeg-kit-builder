@@ -1,4 +1,4 @@
-name: Build ffmpeg-kit-full 16KB AAR
+name: Build ffmpeg-kit-core 16KB AAR
 
 on: workflow_dispatch
 
@@ -79,12 +79,20 @@ jobs:
           echo "----- Patched ffmpeg.sh (grep check) -----"
           grep -n "LDFLAGS=" "$FILE" || true
 
-      - name: Build ffmpeg-kit (full, non-GPL, arm64-v8a only)
+      - name: Build ffmpeg-kit (core, no external libraries, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
           chmod +x android.sh
           set -o pipefail
+          # No external libraries enabled on purpose: this matches the stock
+          # ffmpeg-kit output (libavcodec/avdevice/avfilter/avformat/avutil/
+          # swresample/swscale + libc++_shared + libffmpegkit/_abidetect, no
+          # extra .so files). android-media-codec and android-zlib are kept
+          # because they're Android platform capabilities compiled straight
+          # into FFmpeg itself (hardware codec access, system zlib) — they add
+          # no external .so and no external-library build steps, so they don't
+          # reintroduce the libuuid/fontconfig problem.
           ./android.sh \
             --disable-arm-v7a \
             --disable-arm-v7a-neon \
@@ -92,34 +100,6 @@ jobs:
             --disable-x86-64 \
             --enable-android-media-codec \
             --enable-android-zlib \
-            --enable-dav1d \
-            --enable-fontconfig \
-            --enable-freetype \
-            --enable-fribidi \
-            --enable-kvazaar \
-            --enable-libass \
-            --enable-libiconv \
-            --enable-libilbc \
-            --enable-libtheora \
-            --enable-libvorbis \
-            --enable-libvpx \
-            --enable-libwebp \
-            --enable-libxml2 \
-            --enable-opencore-amr \
-            --enable-opus \
-            --enable-shine \
-            --enable-snappy \
-            --enable-soxr \
-            --enable-speex \
-            --enable-twolame \
-            --enable-vo-amrwbenc \
-            --enable-zimg \
-            --enable-gmp \
-            --enable-gnutls \
-            --enable-lame \
-            --enable-chromaprint \
-            --enable-openssl \
-            --enable-srt \
             2>&1 | tee build_console.log
           BUILD_EXIT=$?
           echo "android.sh exit code: $BUILD_EXIT"
@@ -147,7 +127,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-kit-full-16kb-aar
+          name: ffmpeg-kit-core-16kb-aar
           path: |
             **/*.aar
           if-no-files-found: error
