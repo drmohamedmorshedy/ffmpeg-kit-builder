@@ -112,12 +112,50 @@ jobs:
             exit 1
           fi
 
+      - name: Create clang++ wrapper stripping -static (for libvpx configure link probe)
+        run: |
+          # libvpx's configure runs a check_ld() sanity probe that links a
+          # trivial test program with -static. NDK's own libc++abi.a is not
+          # built to be pulled into a fully-static (non-PIE) executable —
+          # ld.lld rejects its objects as "incompatible with aarch64linux"
+          # even though the same objects link fine normally. This is a
+          # known Clang/libc++ limitation (no supported way to statically
+          # link libc++abi while still linking other libs dynamically),
+          # unrelated to our NDK pin, our other patches, or the actual
+          # ffmpeg-kit/libvpx shared-library build that follows.
+          #
+          # Fix: wrap clang++ so it silently drops any -static argument
+          # before invoking the real compiler.
+          mkdir -p "$HOME/vpx-cxx-wrapper"
+          REAL_CXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          WRAPPER="$HOME/vpx-cxx-wrapper/aarch64-linux-android24-clang++"
+          {
+            printf '#!/bin/bash\n'
+            printf 'args=()\n'
+            printf 'for arg in "$@"; do\n'
+            printf '  if [ "$arg" != "-static" ]; then\n'
+            printf '    args+=("$arg")\n'
+            printf '  fi\n'
+            printf 'done\n'
+            printf 'exec "%s" "${args[@]}"\n' "$REAL_CXX"
+          } > "$WRAPPER"
+          chmod +x "$WRAPPER"
+          cat "$WRAPPER"
+          echo "VPX_CXX_WRAPPER_DIR=$HOME/vpx-cxx-wrapper" >> "$GITHUB_ENV"
+
       - name: Build ffmpeg-kit (full minus libass/fontconfig, non-GPL, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
           chmod +x android.sh
           set -o pipefail
+          # Put the -static-stripping wrapper first on PATH for this step
+          # only, so libvpx's configure link probe uses it instead of the
+          # real clang++. Every other library's build (and libvpx's actual
+          # shared-library compile, which never passes -static) still
+          # resolves to the same wrapper, but the wrapper is a no-op unless
+          # -static is present, so nothing else is affected.
+          export PATH="$VPX_CXX_WRAPPER_DIR:$PATH"
           # libass (and therefore fontconfig, which libass depends on per
           # arthenica's own External-Libraries wiki page) is intentionally
           # OMITTED. libass is subtitle rendering/burn-in support, which this
