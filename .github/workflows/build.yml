@@ -79,6 +79,28 @@ jobs:
           echo "----- Patched ffmpeg.sh (grep check) -----"
           grep -n "LDFLAGS=" "$FILE" || true
 
+      - name: Patch fftools_ffmpeg_mux_init.c for NDK r26+ Clang bit-field error
+        run: |
+          # Newer Clang (bundled with NDK r26+) added -Wsingle-bit-bitfield-constant-conversion,
+          # which -Werror promotes to a hard error. FFmpeg's EncStats struct declares these as
+          # signed 1-bit fields (legal range -1..0) but initializes them with the literal 1,
+          # which is only valid for an unsigned 1-bit field (range 0..1). This is the same fix
+          # arthenica applied upstream for this exact error (ffmpeg-kit issue #1076): widen the
+          # three fields to unsigned.
+          FILE=android/ffmpeg-kit-android-lib/src/main/cpp/fftools_ffmpeg_mux_init.c
+          sed -i \
+            -e 's/\bint pre_only:1;/unsigned int pre_only:1;/' \
+            -e 's/\bint post_only:1;/unsigned int post_only:1;/' \
+            -e 's/\bint need_input_data:1;/unsigned int need_input_data:1;/' \
+            "$FILE"
+          echo "----- Patched fftools_ffmpeg_mux_init.c (grep check) -----"
+          grep -n "unsigned int pre_only:1\|unsigned int post_only:1\|unsigned int need_input_data:1" "$FILE"
+          MATCHES=$(grep -c "unsigned int pre_only:1\|unsigned int post_only:1\|unsigned int need_input_data:1" "$FILE" || true)
+          if [ "$MATCHES" -lt 3 ]; then
+            echo "ERROR: expected 3 patched bit-field declarations, found $MATCHES. Upstream source may have changed — check this file manually."
+            exit 1
+          fi
+
       - name: Build ffmpeg-kit (core, no external libraries, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
