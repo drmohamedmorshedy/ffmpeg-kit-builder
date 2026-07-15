@@ -224,8 +224,20 @@ jobs:
           # fribidi for bidi text shaping). Neither is used by anything else
           # in this dependency set.
           #
-          # Nothing here affects TLS/HTTP/codec support: gnutls, openssl,
-          # dav1d, libvpx, libwebp, opus, lame, srt, etc. are all untouched.
+          # Nothing here affects codec support: dav1d, libvpx, libwebp,
+          # opus, lame, srt, etc. are all untouched.
+          #
+          # --enable-gnutls is intentionally OMITTED (even though it's part
+          # of arthenica's documented "full" library list). FFmpeg's own
+          # ./configure hard-refuses to build with both TLS backends at
+          # once:
+          #   GnuTLS and OpenSSL must not be enabled at the same time.
+          # OpenSSL is kept instead of GnuTLS since SRT (--enable-srt above)
+          # already links against OpenSSL's libcrypto for its own
+          # encryption, so keeping OpenSSL avoids pulling in a second TLS
+          # stack. If GnuTLS-specific features are ever needed later, drop
+          # --enable-openssl and --enable-srt's implicit OpenSSL link
+          # instead, don't try to enable both.
           ./android.sh \
             --disable-arm-v7a \
             --disable-arm-v7a-neon \
@@ -235,7 +247,6 @@ jobs:
             --enable-android-zlib \
             --enable-dav1d \
             --enable-gmp \
-            --enable-gnutls \
             --enable-kvazaar \
             --enable-lame \
             --enable-libiconv \
