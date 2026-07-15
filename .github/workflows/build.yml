@@ -54,12 +54,24 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          # libvpx's own build tooling reads the bare ANDROID_NDK variable
+          # (separate from ANDROID_NDK_ROOT/ANDROID_NDK_HOME, which is what
+          # ffmpeg-kit's own scripts use). Without this, it silently falls
+          # back to whatever NDK is preinstalled on the GitHub-hosted runner
+          # image (r27+ as of mid-2026), which lacks the NDK_PROC_*_ABI /
+          # NDK_ARCH_*_ABI compat vars some Android CMake toolchain detection
+          # paths rely on — producing "Toolchain is unable to link
+          # executables" at libvpx's configure step even though every other
+          # library in this same build succeeds under r26d.
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
 
       - name: Confirm SDK/NDK environment
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK=$ANDROID_NDK"
           ls "$ANDROID_NDK_ROOT" | head -20
 
       - name: Patch Android.mk for 16KB page size
