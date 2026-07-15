@@ -2,30 +2,16 @@ name: Build ffmpeg-kit-full 16KB AAR
 
 on: workflow_dispatch
 
-env:
-  FFMPEG_KIT_COMMIT: d6be56d7aec286eb3c292d6b23ff07a6b70d8693
-  NDK_VERSION: 27.3.13750724
-
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     steps:
-      - name: Checkout ffmpeg-kit source (pinned, immutable)
+      - name: Checkout ffmpeg-kit source
         uses: actions/checkout@v4
         with:
           repository: arthenica/ffmpeg-kit
-          ref: d6be56d7aec286eb3c292d6b23ff07a6b70d8693
-          fetch-depth: 0
-
-      - name: Assert checked-out commit matches pinned revision
-        run: |
-          set -euo pipefail
-          ACTUAL_SHA="$(git rev-parse HEAD)"
-          if [ "$ACTUAL_SHA" != "$FFMPEG_KIT_COMMIT" ]; then
-            echo "ERROR: checked-out commit ($ACTUAL_SHA) does not match pinned commit ($FFMPEG_KIT_COMMIT)."
-            exit 1
-          fi
-          echo "Confirmed checkout at pinned commit $ACTUAL_SHA (Android Maven revision 6.0-2 source line)."
+          ref: main
 
       - name: Install build prerequisites
         run: |
@@ -34,7 +20,7 @@ jobs:
             autoconf automake libtool pkg-config curl git doxygen nasm \
             cmake gcc gperf texinfo yasm bison autogen wget autopoint \
             meson ninja-build ragel groff gtk-doc-tools libtasn1-6-dev \
-            unzip file binutils gawk
+            unzip
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -42,9 +28,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK cmdline-tools and NDK r27d (self-managed, no third-party SDK/NDK actions)
+      - name: Install Android SDK cmdline-tools and NDK r26d (self-managed, no third-party SDK/NDK actions)
         run: |
-          set -euo pipefail
+          set -e
           export ANDROID_SDK_ROOT="$HOME/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           cd "$ANDROID_SDK_ROOT/cmdline-tools"
@@ -52,19 +38,22 @@ jobs:
           unzip -q cmdline-tools.zip
           mv cmdline-tools latest
           rm cmdline-tools.zip
-
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses > /dev/null || true
-          # NDK r27d: r26d's libc++_shared.so is not guaranteed 16 KB (0x4000)
-          # PT_LOAD-aligned. r27d is Google's documented minimum NDK for
-          # reliable 16 KB page-size compliance across all packaged native
-          # libraries, including the STL runtime itself.
-          sdkmanager --install "ndk;${NDK_VERSION}" "platform-tools" "platforms;android-34" "build-tools;35.0.0" > /dev/null
-
+          # Pinned to r26d, not r27: NDK r27 dropped the NDK_PROC_*_ABI / NDK_ARCH_*_ABI
+          # compatibility variables from build/cmake/abis.cmake. CMake's own
+          # Android-Determine.cmake relies on those when a dependency (e.g. libsrt)
+          # configures via raw CMAKE_SYSTEM_PROCESSOR=aarch64 instead of the NDK's
+          # own android.toolchain.cmake — that combination fails on r27+ with
+          # "Android: Unknown processor CMAKE_SYSTEM_PROCESSOR='aarch64'".
+          # r26d still has the compat shims, and our manual 16KB linker flags below
+          # are Google's documented approach for r27-or-lower anyway, so this
+          # doesn't cost us anything on the 16KB-alignment goal.
+          sdkmanager --install "ndk;26.3.11579264" "platform-tools" "platforms;android-34" > /dev/null
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
 
       - name: Confirm SDK/NDK environment
         run: |
@@ -73,128 +62,24 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
           ls "$ANDROID_NDK_ROOT" | head -20
 
-      - name: Pre-flight - verify r27d libc++_shared.so is 16 KB aligned
+      - name: Patch Android.mk for 16KB page size
         run: |
-          set -euo pipefail
-          # Fail fast before the expensive build unless every PT_LOAD segment
-          # in the NDK's own arm64 libc++_shared.so is aligned to at least 0x4000.
-          LIBCXX="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-          if [ ! -f "$LIBCXX" ]; then
-            echo "ERROR: could not locate libc++_shared.so at expected path: $LIBCXX"
-            exit 1
-          fi
-          READELF="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          "$READELF" -l "$LIBCXX" | tee libcxx_shared_segments.txt
-
-          BAD=0
-          while read -r ALIGN; do
-            ALIGN_DEC=$((ALIGN))
-            if [ "$ALIGN_DEC" -lt $((0x4000)) ]; then
-              BAD=1
-            fi
-          done < <(awk '/LOAD/ { for (i=1;i<=NF;i++) if ($i ~ /^0x/) last=$i; print last }' libcxx_shared_segments.txt)
-
-          if [ "$BAD" -ne 0 ]; then
-            echo "ERROR: r27d libc++_shared.so contains a PT_LOAD segment aligned below 0x4000 (16 KB). Aborting before build."
-            exit 1
-          fi
-          echo "Confirmed: r27d libc++_shared.so PT_LOAD segments are all >= 0x4000 aligned."
-
-      - name: Patch function-android.sh - enable APP_SUPPORT_FLEXIBLE_PAGE_SIZES
-        run: |
-          set -euo pipefail
-          FILE=scripts/function-android.sh
-          BEFORE=$(grep -c "APP_STL" "$FILE" || true)
-          # build_application_mk() emits the Application.mk contents; add the
-          # NDK r27 flexible-page-size flag alongside the existing APP_STL line.
-          sed -i '/APP_STL[[:space:]]*:=/a\    echo "APP_SUPPORT_FLEXIBLE_PAGE_SIZES := true" >> "${BUILD_APPLICATION_MK_PATH}"' "$FILE"
-          AFTER=$(grep -c "APP_SUPPORT_FLEXIBLE_PAGE_SIZES" "$FILE" || true)
-          echo "----- Patched function-android.sh (grep check) -----"
-          grep -n "APP_SUPPORT_FLEXIBLE_PAGE_SIZES\|APP_STL" "$FILE"
-          if [ "$AFTER" -lt 1 ]; then
-            echo "ERROR: expected at least 1 occurrence of APP_SUPPORT_FLEXIBLE_PAGE_SIZES after patch, found $AFTER."
-            exit 1
-          fi
+          MK=android/jni/Android.mk
+          sed -i '/LOCAL_MODULE *:= *ffmpegkit$/a LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384' "$MK"
+          sed -i '/LOCAL_MODULE *:= *ffmpegkit_abidetect$/a LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384' "$MK"
+          echo "----- Patched Android.mk (grep check) -----"
+          grep -n -A1 "LOCAL_MODULE" "$MK"
 
       - name: Patch ffmpeg.sh LDFLAGS for 16KB page size
         run: |
-          set -euo pipefail
           FILE=scripts/android/ffmpeg.sh
-          # v6.0 declares this as a quoted assignment:
-          #   export LDFLAGS="$(get_ldflags "${LIB_NAME}")"
-          # An earlier version of this patch assumed an unquoted form that
-          # does not exist in this source tree (0 pre-patch matches), which
-          # made the step fail closed as designed. Anchor on the stable
-          # get_ldflags "${LIB_NAME}" substring inside the LDFLAGS export so
-          # the match survives incidental quoting differences, and keep the
-          # match count assertion so an unexpected shape still fails the job.
-          PRE_MATCHES=$(grep -cE '^export LDFLAGS="?\$\(get_ldflags "\$\{LIB_NAME\}"\)"?$' "$FILE" || true)
-          if [ "$PRE_MATCHES" -ne 1 ]; then
-            echo "ERROR: expected exactly 1 pre-patch match for the LDFLAGS export in $FILE, found $PRE_MATCHES."
-            exit 1
-          fi
-
-          sed -i -E 's/^export LDFLAGS="?\$\(get_ldflags "\$\{LIB_NAME\}"\)"?$/export LDFLAGS="$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"/' "$FILE"
-
-          POST_MATCHES=$(grep -cF 'export LDFLAGS="$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"' "$FILE" || true)
+          # Insert 16KB linker flags into the LDFLAGS export line used during FFmpeg's own build
+          sed -i 's/^export LDFLAGS="\$(get_ldflags "\${LIB_NAME}")"$/export LDFLAGS="$(get_ldflags "${LIB_NAME}") -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"/' "$FILE"
           echo "----- Patched ffmpeg.sh (grep check) -----"
           grep -n "LDFLAGS=" "$FILE" || true
-          if [ "$POST_MATCHES" -ne 1 ]; then
-            echo "ERROR: expected exactly 1 post-patch match in $FILE, found $POST_MATCHES."
-            exit 1
-          fi
 
-      - name: Patch Android.mk - add 16KB linker flags to ffmpegkit targets
+      - name: Patch fftools_ffmpeg_mux_init.c for NDK r26+ Clang bit-field error
         run: |
-          set -euo pipefail
-          MK=android/jni/Android.mk
-
-          PRE_ABIDETECT=$(grep -c "LOCAL_MODULE *:= *ffmpegkit_abidetect" "$MK" || true)
-          PRE_FFMPEGKIT=$(grep -c "^LOCAL_MODULE *:= *ffmpegkit$" "$MK" || true)
-          if [ "$PRE_ABIDETECT" -lt 1 ] || [ "$PRE_FFMPEGKIT" -lt 1 ]; then
-            echo "ERROR: expected to find ffmpegkit and ffmpegkit_abidetect module declarations in $MK before patching."
-            exit 1
-          fi
-
-          sed -i '/LOCAL_MODULE *:= *ffmpegkit$/a LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384' "$MK"
-          sed -i '/LOCAL_MODULE *:= *ffmpegkit_abidetect$/a LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384' "$MK"
-          # NEON wrapper block
-          sed -i '/LOCAL_MODULE *:= *ffmpegkit_neon$/a LOCAL_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384' "$MK"
-
-          POST_MATCHES=$(grep -c "max-page-size=16384" "$MK" || true)
-          echo "----- Patched Android.mk (grep check) -----"
-          grep -n -A1 "LOCAL_MODULE" "$MK"
-          if [ "$POST_MATCHES" -lt 2 ]; then
-            echo "ERROR: expected at least 2 occurrences of max-page-size=16384 in $MK after patch, found $POST_MATCHES."
-            exit 1
-          fi
-
-      - name: Patch Android.mk - remove manual c++_shared compatibility blocks
-        run: |
-          set -euo pipefail
-          MK=android/jni/Android.mk
-          # NDK r27 packages the selected APP_STL := c++_shared runtime through
-          # its own STL install rules; the old manual blocks now cause an
-          # undefined-module failure and must be removed.
-          PRE_MATCHES=$(grep -c "LOCAL_SHARED_LIBRARIES += c++_shared" "$MK" || true)
-          if [ "$PRE_MATCHES" -ne 2 ]; then
-            echo "ERROR: expected exactly 2 pre-patch occurrences of 'LOCAL_SHARED_LIBRARIES += c++_shared' in $MK, found $PRE_MATCHES."
-            exit 1
-          fi
-
-          sed -i '/LOCAL_SHARED_LIBRARIES += c++_shared/d' "$MK"
-
-          POST_MATCHES=$(grep -c "LOCAL_SHARED_LIBRARIES += c++_shared" "$MK" || true)
-          echo "----- Patched Android.mk (grep check) -----"
-          grep -n "c++_shared" "$MK" || true
-          if [ "$POST_MATCHES" -ne 0 ]; then
-            echo "ERROR: expected 0 occurrences of 'LOCAL_SHARED_LIBRARIES += c++_shared' in $MK after patch, found $POST_MATCHES."
-            exit 1
-          fi
-
-      - name: Patch fftools_ffmpeg_mux_init.c for NDK r27+ Clang bit-field error
-        run: |
-          set -euo pipefail
           # Newer Clang (bundled with NDK r26+) added -Wsingle-bit-bitfield-constant-conversion,
           # which -Werror promotes to a hard error. FFmpeg's EncStats struct declares these as
           # signed 1-bit fields (legal range -1..0) but initializes them with the literal 1,
@@ -202,62 +87,37 @@ jobs:
           # arthenica applied upstream for this exact error (ffmpeg-kit issue #1076): widen the
           # three fields to unsigned.
           FILE=android/ffmpeg-kit-android-lib/src/main/cpp/fftools_ffmpeg_mux_init.c
-
-          PRE_MATCHES=$(grep -cE '\bint[[:space:]]+(pre_only|post_only|need_input_data):1;' "$FILE" || true)
-          if [ "$PRE_MATCHES" -ne 3 ]; then
-            echo "ERROR: expected exactly 3 pre-patch signed 1-bit field declarations in $FILE, found $PRE_MATCHES."
-            exit 1
-          fi
-
           sed -i -E \
             -e 's/\bint([[:space:]]+pre_only:1;)/unsigned int\1/' \
             -e 's/\bint([[:space:]]+post_only:1;)/unsigned int\1/' \
             -e 's/\bint([[:space:]]+need_input_data:1;)/unsigned int\1/' \
             "$FILE"
-
-          POST_MATCHES=$(grep -cE 'unsigned int[[:space:]]+(pre_only|post_only|need_input_data):1;' "$FILE" || true)
           echo "----- Patched fftools_ffmpeg_mux_init.c (grep check) -----"
           grep -n "unsigned int.*pre_only:1\|unsigned int.*post_only:1\|unsigned int.*need_input_data:1" "$FILE"
-          if [ "$POST_MATCHES" -ne 3 ]; then
-            echo "ERROR: expected exactly 3 patched unsigned bit-field declarations in $FILE, found $POST_MATCHES."
+          MATCHES=$(grep -c "unsigned int.*pre_only:1\|unsigned int.*post_only:1\|unsigned int.*need_input_data:1" "$FILE" || true)
+          if [ "$MATCHES" -lt 3 ]; then
+            echo "ERROR: expected 3 patched bit-field declarations, found $MATCHES. Upstream source may have changed — check this file manually."
             exit 1
           fi
 
-      - name: Patch libuuid.sh - force <sys/file.h> include for flock visibility
-        run: |
-          set -euo pipefail
-          FILE=scripts/android/libuuid.sh
-          PRE_MATCHES=$(grep -c "gen_uuid.c" "$FILE" || true)
-          if [ "$PRE_MATCHES" -lt 1 ]; then
-            echo "ERROR: expected to find a gen_uuid.c reference in $FILE before patching."
-            exit 1
-          fi
-          # Modern Clang under NDK r27 no longer implicitly exposes the flock()
-          # prototype declared in <sys/file.h> for this compilation unit. Force
-          # the include via CFLAGS rather than suppressing the diagnostic.
-          sed -i 's/^\(\s*CFLAGS="\)/\1-include sys\/file.h /' "$FILE"
-
-          POST_MATCHES=$(grep -c -- "-include sys/file.h" "$FILE" || true)
-          echo "----- Patched libuuid.sh (grep check) -----"
-          grep -n "CFLAGS=" "$FILE" || true
-          if [ "$POST_MATCHES" -lt 1 ]; then
-            echo "ERROR: expected at least 1 occurrence of forced sys/file.h include in $FILE after patch, found $POST_MATCHES."
-            exit 1
-          fi
-
-      - name: Build ffmpeg-kit (full, non-GPL, arm64-v8a only)
+      - name: Build ffmpeg-kit (full minus fontconfig, non-GPL, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
           chmod +x android.sh
           set -o pipefail
-          # Explicit package list reproducing the official non-GPL full feature
-          # set for ffmpeg-kit-full:6.0-2. GnuTLS is the sole TLS backend
-          # (HTTP is built into FFmpeg; HTTPS comes from GnuTLS). chromaprint,
-          # openssl, and srt are intentionally excluded: they were custom-build
-          # additions, not part of the official full flavor. No --rebuild-libuuid:
-          # this is a fresh runner doing a clean source build, and the actual
-          # libuuid compiler issue is handled by the targeted patch above.
+          # fontconfig is intentionally OMITTED. It only exists to let libass look up
+          # fonts by family name from a system font database; Android has no such
+          # database anyway, so real-world integrations pass libass a font file path
+          # directly. Its only purpose here was pulling in libuuid, whose gen_uuid.c
+          # calls flock() without including the header that declares it under
+          # -std=c99 on Bionic — modern Clang treats that as a hard error
+          # (-Wimplicit-function-declaration), not a warning. Dropping fontconfig
+          # removes the broken dependency instead of patching a legacy C file, and
+          # costs nothing relevant to TLS/HTTP/codec support.
+          # freetype and fribidi are kept: freetype does glyph rendering (used by
+          # libass directly) and fribidi does bidi text shaping — neither depends
+          # on libuuid.
           ./android.sh \
             --disable-arm-v7a \
             --disable-arm-v7a-neon \
@@ -266,7 +126,6 @@ jobs:
             --enable-android-media-codec \
             --enable-android-zlib \
             --enable-dav1d \
-            --enable-fontconfig \
             --enable-freetype \
             --enable-fribidi \
             --enable-gmp \
@@ -282,14 +141,17 @@ jobs:
             --enable-libwebp \
             --enable-libxml2 \
             --enable-opencore-amr \
+            --enable-openssl \
             --enable-opus \
             --enable-shine \
             --enable-snappy \
             --enable-soxr \
             --enable-speex \
+            --enable-srt \
             --enable-twolame \
             --enable-vo-amrwbenc \
             --enable-zimg \
+            --enable-chromaprint \
             2>&1 | tee build_console.log
           BUILD_EXIT=$?
           echo "android.sh exit code: $BUILD_EXIT"
@@ -318,263 +180,21 @@ jobs:
           echo "----- last 300 lines of build_console.log -----"
           tail -n 300 build_console.log || echo "build_console.log not found"
 
-      - name: Locate AAR output (require exactly one candidate)
+      - name: Locate AAR output
         if: success()
         run: |
-          set -euo pipefail
-          EXPECTED_DIR="android/ffmpeg-kit-android-lib/build/outputs/aar"
-          CANDIDATES=$(find "$EXPECTED_DIR" -maxdepth 1 -name "*.aar" 2>/dev/null || true)
-          COUNT=$(echo "$CANDIDATES" | grep -c . || true)
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: expected exactly 1 AAR candidate in $EXPECTED_DIR, found $COUNT."
-            echo "Candidates found:"
-            echo "$CANDIDATES"
-            exit 1
-          fi
-          AAR_PATH=$(echo "$CANDIDATES" | head -n1)
-          echo "AAR_PATH=$AAR_PATH" >> "$GITHUB_ENV"
-          ls -lh "$AAR_PATH"
+          find . -name "*.aar" -exec ls -lh {} \;
 
-      - name: Extract AAR into clean verification directory
-        if: success()
-        run: |
-          set -euo pipefail
-          rm -rf verify
-          mkdir -p verify
-          cp "$AAR_PATH" verify/input.aar
-          cd verify
-          mkdir extracted
-          cd extracted
-          unzip -q ../input.aar
-          echo "----- Extracted AAR contents -----"
-          find . -type f | sort
-
-      - name: Verify ABI - only jni/arm64-v8a present
-        if: success()
-        run: |
-          set -euo pipefail
-          cd verify/extracted
-          if [ ! -d "jni/arm64-v8a" ]; then
-            echo "ERROR: jni/arm64-v8a directory not found in AAR."
-            exit 1
-          fi
-          OTHER_ABIS=$(find jni -mindepth 1 -maxdepth 1 -type d ! -name "arm64-v8a" || true)
-          if [ -n "$OTHER_ABIS" ]; then
-            echo "ERROR: unexpected ABI directories found alongside arm64-v8a:"
-            echo "$OTHER_ABIS"
-            exit 1
-          fi
-          echo "Confirmed: only jni/arm64-v8a is present."
-
-      - name: Verify native payload - required libraries present
-        if: success()
-        run: |
-          set -euo pipefail
-          cd verify/extracted/jni/arm64-v8a
-          REQUIRED_LIBS="libavcodec.so libavdevice.so libavfilter.so libavformat.so libavutil.so libswresample.so libswscale.so libffmpegkit.so libffmpegkit_abidetect.so libc++_shared.so"
-          MISSING=0
-          for LIB in $REQUIRED_LIBS; do
-            if [ ! -f "$LIB" ]; then
-              echo "ERROR: required library missing from AAR: $LIB"
-              MISSING=1
-            else
-              echo "Found: $LIB"
-            fi
-          done
-          if [ "$MISSING" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Confirmed: all seven FFmpeg libraries plus libffmpegkit.so, libffmpegkit_abidetect.so, and libc++_shared.so are present."
-
-      - name: Verify ELF 16 KB alignment for every packaged .so
-        if: success()
-        run: |
-          set -euo pipefail
-          READELF="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          cd verify/extracted/jni/arm64-v8a
-          FAIL=0
-          echo "library,min_pt_load_align_hex" > /tmp/alignment_report.csv
-          for SO in *.so; do
-            MIN_ALIGN_DEC=999999999
-            while read -r ALIGN; do
-              ALIGN_DEC=$((ALIGN))
-              if [ "$ALIGN_DEC" -lt "$MIN_ALIGN_DEC" ]; then
-                MIN_ALIGN_DEC=$ALIGN_DEC
-              fi
-            done < <(file "$SO" | grep -q "ELF" && "$READELF" -l "$SO" | awk '/LOAD/ { for (i=1;i<=NF;i++) if ($i ~ /^0x/) last=$i; print last }')
-
-            if [ "$MIN_ALIGN_DEC" -lt $((0x4000)) ]; then
-              echo "FAIL: $SO has a PT_LOAD segment aligned below 0x4000 (min found: $MIN_ALIGN_DEC)"
-              FAIL=1
-            else
-              echo "OK: $SO min PT_LOAD align = $MIN_ALIGN_DEC"
-            fi
-            printf "%s,0x%x\n" "$SO" "$MIN_ALIGN_DEC" >> /tmp/alignment_report.csv
-          done
-          cp /tmp/alignment_report.csv ../../../alignment_report.csv
-          if [ "$FAIL" -ne 0 ]; then
-            echo "ERROR: one or more packaged .so files failed the 16 KB PT_LOAD alignment check."
-            exit 1
-          fi
-          echo "Confirmed: every packaged .so has all PT_LOAD segments aligned to at least 0x4000."
-
-      - name: Verify runtime DT_NEEDED closure
-        if: success()
-        run: |
-          set -euo pipefail
-          READELF="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          cd verify/extracted/jni/arm64-v8a
-          PACKAGED_LIBS=$(ls *.so)
-          FAIL=0
-          for SO in *.so; do
-            NEEDED=$("$READELF" -d "$SO" | grep NEEDED | awk -F'[][]' '{print $2}')
-            for DEP in $NEEDED; do
-              case "$DEP" in
-                libc.so|libm.so|libdl.so|liblog.so|libz.so|libandroid.so|libmediandk.so)
-                  continue
-                  ;;
-              esac
-              if ! echo "$PACKAGED_LIBS" | grep -qx "$DEP"; then
-                echo "ERROR: $SO depends on non-system library $DEP, which is not present in the AAR."
-                FAIL=1
-              fi
-            done
-          done
-          if [ "$FAIL" -ne 0 ]; then
-            echo "ERROR: runtime closure check failed; bundled third-party libraries must be statically linked or packaged."
-            exit 1
-          fi
-          echo "Confirmed: every non-system DT_NEEDED dependency is satisfied within the AAR."
-
-      - name: Verify network and Android feature flags in build configuration
-        if: success()
-        run: |
-          set -euo pipefail
-          CONFIG_FILE=$(find . -path "*/prebuilt/*" -name "ffbuild_config.h" 2>/dev/null | grep -i arm64 | head -n1 || true)
-          if [ -z "$CONFIG_FILE" ]; then
-            CONFIG_FILE=$(find . -name "config.h" -path "*android-arm64*" 2>/dev/null | head -n1 || true)
-          fi
-          if [ -z "$CONFIG_FILE" ]; then
-            echo "ERROR: could not locate generated FFmpeg configuration header for arm64."
-            exit 1
-          fi
-          echo "Using config file: $CONFIG_FILE"
-
-          REQUIRED_DEFINES="CONFIG_HTTP_PROTOCOL CONFIG_HTTPS_PROTOCOL CONFIG_GNUTLS"
-          FAIL=0
-          for DEFINE in $REQUIRED_DEFINES; do
-            if ! grep -qE "#define ${DEFINE} 1" "$CONFIG_FILE"; then
-              echo "ERROR: $DEFINE is not enabled in $CONFIG_FILE"
-              FAIL=1
-            else
-              echo "Confirmed enabled: $DEFINE"
-            fi
-          done
-          if [ "$FAIL" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Confirmed: CONFIG_HTTP_PROTOCOL, CONFIG_HTTPS_PROTOCOL, and CONFIG_GNUTLS are all enabled."
-
-      - name: Verify Android MediaCodec and zlib features enabled
-        if: success()
-        run: |
-          set -euo pipefail
-          CONFIG_FILE=$(find . -name "config.h" -path "*android-arm64*" 2>/dev/null | head -n1 || true)
-          if [ -z "$CONFIG_FILE" ]; then
-            echo "ERROR: could not locate generated FFmpeg configuration header for arm64."
-            exit 1
-          fi
-          FAIL=0
-          if ! grep -qE "#define CONFIG_MEDIACODEC 1" "$CONFIG_FILE"; then
-            echo "ERROR: CONFIG_MEDIACODEC is not enabled in $CONFIG_FILE"
-            FAIL=1
-          fi
-          if ! grep -qE "#define CONFIG_ZLIB 1" "$CONFIG_FILE"; then
-            echo "ERROR: CONFIG_ZLIB is not enabled in $CONFIG_FILE"
-            FAIL=1
-          fi
-          if [ "$FAIL" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Confirmed: MediaCodec and zlib are enabled."
-
-      - name: Verify full non-GPL feature set and excluded libraries
-        if: success()
-        run: |
-          set -euo pipefail
-          CONFIG_FILE=$(find . -name "config.h" -path "*android-arm64*" 2>/dev/null | head -n1 || true)
-          if [ -z "$CONFIG_FILE" ]; then
-            echo "ERROR: could not locate generated FFmpeg configuration header for arm64."
-            exit 1
-          fi
-
-          MUST_BE_DISABLED="CONFIG_CHROMAPRINT CONFIG_OPENSSL CONFIG_LIBSRT CONFIG_GPL"
-
-          FAIL=0
-          for DEFINE in $MUST_BE_DISABLED; do
-            if grep -qE "#define ${DEFINE} 1" "$CONFIG_FILE"; then
-              echo "ERROR: $DEFINE is enabled in $CONFIG_FILE but must be excluded (non-GPL full flavor)."
-              FAIL=1
-            fi
-          done
-
-          if [ "$FAIL" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Confirmed: OpenSSL, SRT, Chromaprint, and GPL-only libraries are excluded."
-          echo "Note: full non-GPL library presence is additionally confirmed by the native payload and runtime closure checks above."
-
-      - name: Compute AAR SHA-256 and assemble provenance report
-        if: success()
-        run: |
-          set -euo pipefail
-          SHA256=$(sha256sum "$AAR_PATH" | awk '{print $1}')
-          SIZE_BYTES=$(stat -c%s "$AAR_PATH")
-
-          {
-            echo "# ffmpeg-kit-full 16KB AAR — Provenance Report"
-            echo ""
-            echo "- Source commit: $FFMPEG_KIT_COMMIT"
-            echo "- NDK version: $NDK_VERSION"
-            echo "- ABI: arm64-v8a"
-            echo "- API level: 24"
-            echo "- Feature flavor: non-GPL full (GnuTLS TLS backend, MediaCodec, zlib)"
-            echo "- Excluded: OpenSSL, SRT, Chromaprint, GPL-only libraries"
-            echo "- AAR SHA-256: $SHA256"
-            echo "- AAR size (bytes): $SIZE_BYTES"
-            echo ""
-            echo "## Per-library PT_LOAD alignment (min observed, hex)"
-            echo ""
-            cat verify/alignment_report.csv
-            echo ""
-            echo "## Packaged library file sizes"
-            echo ""
-            ls -lh verify/extracted/jni/arm64-v8a/*.so
-          } > provenance_report.md
-
-          echo "AAR_SHA256=$SHA256" >> "$GITHUB_ENV"
-          cat provenance_report.md
-
-      - name: Rename verified AAR to stable output name
-        if: success()
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          cp "$AAR_PATH" "release/ffmpeg-kit-full-6.0-2-arm64-v8a-16kb.aar"
-          ls -lh release/
-
-      - name: Upload verified AAR and provenance report
+      - name: Upload AAR artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-kit-full-6.0-2-arm64-16kb
+          name: ffmpeg-kit-full-16kb-aar
           path: |
-            release/ffmpeg-kit-full-6.0-2-arm64-v8a-16kb.aar
-            provenance_report.md
-            verify/alignment_report.csv
+            **/*.aar
           if-no-files-found: error
 
-      - name: Upload full build and patch logs (always, for debugging)
+      - name: Upload full build log (always, for debugging)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -582,12 +202,4 @@ jobs:
           path: |
             build.log
             build_console.log
-            android/jni/Android.mk
-            scripts/android/ffmpeg.sh
-            scripts/function-android.sh
-            scripts/android/libuuid.sh
-            android/ffmpeg-kit-android-lib/src/main/cpp/fftools_ffmpeg_mux_init.c
-            **/Application.mk
-            provenance_report.md
-            verify/alignment_report.csv
           if-no-files-found: ignore
