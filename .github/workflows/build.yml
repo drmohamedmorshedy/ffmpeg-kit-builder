@@ -143,25 +143,25 @@ jobs:
           cat "$WRAPPER"
           echo "VPX_CXX_WRAPPER_DIR=$HOME/vpx-cxx-wrapper" >> "$GITHUB_ENV"
 
-      - name: Create writable /usr/local/lib for SRT's hardcoded install prefix
+      - name: Create writable /usr/local prefix for SRT's hardcoded install
         run: |
           # SRT's CMake build defaults CMAKE_INSTALL_PREFIX to /usr/local
           # and its own "make install" step (triggered internally by
-          # android.sh's SRT build) tries to copy libsrt.so.<ver> there.
-          # The runner user can't write to /usr/local/lib by default, so
-          # this fails with:
-          #   CMake Error at cmake_install.cmake:57 (file):
-          #     file INSTALL cannot copy file ".../libsrt.so.1.5.2"
-          #     to "/usr/local/lib/libsrt.so.1.5.2": Permission denied.
-          # even though libsrt.a/libsrt.so themselves already built and
-          # linked successfully just before this step.
+          # android.sh's SRT build) installs into multiple subdirectories
+          # under that prefix: libsrt.so*/.a into lib/, and its headers
+          # into include/srt/. The runner user can't write to /usr/local by
+          # default, so this failed in two steps across two runs:
+          #   1) file INSTALL cannot copy ".../libsrt.so.1.5.2" to
+          #      "/usr/local/lib/libsrt.so.1.5.2": Permission denied.
+          #   2) (after fixing lib/ only) file cannot create directory:
+          #      /usr/local/include/srt. Maybe need administrative privileges.
+          # Rather than chase every subdirectory SRT's install() targets
+          # individually, chown the whole /usr/local prefix up front.
           #
           # sudo is available and passwordless on GitHub-hosted ubuntu-24.04
-          # runners, so just make the directory SRT actually targets
-          # writable rather than chasing CMAKE_INSTALL_PREFIX propagation
-          # through android.sh/SRT's CMakeLists.
-          sudo mkdir -p /usr/local/lib
-          sudo chown -R "$(id -u):$(id -g)" /usr/local/lib
+          # runners, so this is safe and standard for this class of error.
+          sudo mkdir -p /usr/local/lib /usr/local/include
+          sudo chown -R "$(id -u):$(id -g)" /usr/local
 
       - name: Build ffmpeg-kit (full minus libass/fontconfig, non-GPL, arm64-v8a only)
         run: |
