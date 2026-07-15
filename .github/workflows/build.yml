@@ -100,24 +100,34 @@ jobs:
             exit 1
           fi
 
-      - name: Build ffmpeg-kit (full minus fontconfig, non-GPL, arm64-v8a only)
+      - name: Build ffmpeg-kit (full minus libass/fontconfig, non-GPL, arm64-v8a only)
         run: |
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
           chmod +x android.sh
           set -o pipefail
-          # fontconfig is intentionally OMITTED. It only exists to let libass look up
-          # fonts by family name from a system font database; Android has no such
-          # database anyway, so real-world integrations pass libass a font file path
-          # directly. Its only purpose here was pulling in libuuid, whose gen_uuid.c
-          # calls flock() without including the header that declares it under
-          # -std=c99 on Bionic — modern Clang treats that as a hard error
-          # (-Wimplicit-function-declaration), not a warning. Dropping fontconfig
-          # removes the broken dependency instead of patching a legacy C file, and
-          # costs nothing relevant to TLS/HTTP/codec support.
-          # freetype and fribidi are kept: freetype does glyph rendering (used by
-          # libass directly) and fribidi does bidi text shaping — neither depends
-          # on libuuid.
+          # libass (and therefore fontconfig, which libass depends on per
+          # arthenica's own External-Libraries wiki page) is intentionally
+          # OMITTED. libass is subtitle rendering/burn-in support, which this
+          # app does not use (confirmed: no -vf ass=/subtitles= anywhere in
+          # the remux pipeline, which is -c copy throughout).
+          #
+          # Root cause this avoids: libass -> fontconfig -> libuuid, and
+          # libuuid's gen_uuid.c calls flock() without the feature-test macro
+          # Bionic needs to expose that prototype under -std=c99, which
+          # modern Clang treats as a hard error (-Wimplicit-function-declaration),
+          # not a warning. Dropping libass removes the entire broken dependency
+          # chain at its root instead of patching legacy C in a library we
+          # don't need. Omitting --enable-fontconfig alone is NOT sufficient,
+          # since --enable-libass pulls fontconfig back in transitively.
+          #
+          # freetype and fribidi are ALSO dropped here since their only
+          # consumer in this build was libass (freetype for glyph rendering,
+          # fribidi for bidi text shaping). Neither is used by anything else
+          # in this dependency set.
+          #
+          # Nothing here affects TLS/HTTP/codec support: gnutls, openssl,
+          # dav1d, libvpx, libwebp, opus, lame, srt, etc. are all untouched.
           ./android.sh \
             --disable-arm-v7a \
             --disable-arm-v7a-neon \
@@ -126,13 +136,10 @@ jobs:
             --enable-android-media-codec \
             --enable-android-zlib \
             --enable-dav1d \
-            --enable-freetype \
-            --enable-fribidi \
             --enable-gmp \
             --enable-gnutls \
             --enable-kvazaar \
             --enable-lame \
-            --enable-libass \
             --enable-libiconv \
             --enable-libilbc \
             --enable-libtheora \
