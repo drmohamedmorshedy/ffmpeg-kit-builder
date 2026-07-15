@@ -20,7 +20,7 @@ jobs:
             autoconf automake libtool pkg-config curl git doxygen nasm \
             cmake gcc gperf texinfo yasm bison autogen wget autopoint \
             meson ninja-build ragel groff gtk-doc-tools libtasn1-6-dev \
-            unzip
+            libtasn1-bin unzip
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
