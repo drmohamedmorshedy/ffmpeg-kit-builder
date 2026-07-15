@@ -156,6 +156,34 @@ jobs:
           # resolves to the same wrapper, but the wrapper is a no-op unless
           # -static is present, so nothing else is affected.
           export PATH="$VPX_CXX_WRAPPER_DIR:$PATH"
+
+          # SRT's own sample CLI apps (srt-live-transmit, srt-file-transmit,
+          # srt-tunnel) fail to link: openssl's libcrypto.a references zlib
+          # symbols (inflateInit_, deflate, etc. via its BIO zlib bridge)
+          # that never get linked in for these executables specifically,
+          # producing "undefined symbol" errors from ld.lld. This doesn't
+          # affect libsrt.a/libsrt.so themselves, which already link
+          # successfully before the apps are attempted — our app only needs
+          # the library, not these instructional sample binaries.
+          #
+          # Fix: SRT's own documented CMake option -DENABLE_APPS=OFF skips
+          # building these apps entirely. Since android.sh downloads SRT's
+          # source mid-build (it doesn't exist yet at this point), we patch
+          # its CMakeLists.txt default via a background watcher that fires
+          # the instant the file appears, rather than as a separate
+          # pre-build step.
+          (
+            for _ in $(seq 1 600); do
+              FILE=$(find . -path "*/src/srt/CMakeLists.txt" -print -quit 2>/dev/null)
+              if [ -n "$FILE" ] && ! grep -q 'option(ENABLE_APPS "Should the Support Applications be Built?" OFF)' "$FILE" 2>/dev/null; then
+                sed -i 's/option(ENABLE_APPS .*/option(ENABLE_APPS "Should the Support Applications be Built?" OFF)/' "$FILE"
+                echo "PATCHED: forced ENABLE_APPS=OFF in $FILE"
+                break
+              fi
+              sleep 1
+            done
+          ) &
+          SRT_WATCHER_PID=$!
           # libass (and therefore fontconfig, which libass depends on per
           # arthenica's own External-Libraries wiki page) is intentionally
           # OMITTED. libass is subtitle rendering/burn-in support, which this
@@ -211,6 +239,8 @@ jobs:
             --enable-chromaprint \
             2>&1 | tee build_console.log
           BUILD_EXIT=$?
+          # Stop the background SRT-patch watcher now that the build is done
+          kill "$SRT_WATCHER_PID" 2>/dev/null || true
           echo "android.sh exit code: $BUILD_EXIT"
           if [ $BUILD_EXIT -ne 0 ]; then
             exit $BUILD_EXIT
@@ -219,6 +249,18 @@ jobs:
           if [ -z "$(find . -name '*.aar' -print -quit)" ]; then
             echo "ERROR: android.sh reported success but no .aar file was produced."
             exit 1
+          fi
+
+      - name: Show whether SRT ENABLE_APPS patch applied (on failure)
+        if: failure()
+        run: |
+          echo "----- searching for SRT CMakeLists.txt -----"
+          FILE=$(find . -path "*/src/srt/CMakeLists.txt" -print -quit 2>/dev/null)
+          if [ -n "$FILE" ]; then
+            echo "Found: $FILE"
+            grep -n "option(ENABLE_APPS" "$FILE" || echo "ENABLE_APPS option line not found"
+          else
+            echo "SRT CMakeLists.txt not found (source may not have been downloaded yet)"
           fi
 
       - name: Show libvpx config.log on failure (if present)
