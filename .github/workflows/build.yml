@@ -308,6 +308,31 @@ jobs:
             find . -iname "config.log" 2>/dev/null | head -20
           fi
 
+      - name: Show ffmpeg's own ffbuild/config.log on failure (if present)
+        if: failure()
+        run: |
+          # FFmpeg's own ./configure (run inside src/ffmpeg/) writes its
+          # detailed compiler/linker probe log to ffbuild/config.log inside
+          # its own source tree. This is DIFFERENT from build.log/
+          # build_console.log (which only capture ffmpeg-kit's wrapper
+          # script output) and different from libvpx's config.log above.
+          # When FFmpeg's configure fails at its initial
+          # "C compiler test failed" sanity check, the real failing
+          # command (and its actual error, e.g. a missing -lpthread or a
+          # rejected linker flag) only shows up in THIS file — the same
+          # way libvpx's own config.log was needed to find the real
+          # -static/-lpthread issue earlier in this build.
+          echo "----- searching for ffmpeg's ffbuild/config.log -----"
+          LOG=$(find . -path "*/ffmpeg/ffbuild/config.log" -print -quit 2>/dev/null)
+          if [ -n "$LOG" ]; then
+            echo "Found: $LOG"
+            echo "----- last 200 lines -----"
+            tail -n 200 "$LOG"
+          else
+            echo "No ffmpeg ffbuild/config.log found (search path: */ffmpeg/ffbuild/config.log)"
+            find . -iname "config.log" 2>/dev/null | head -20
+          fi
+
       - name: Show tail of build.log on failure
         if: failure()
         run: |
@@ -347,3 +372,4 @@ jobs:
             build.log
             build_console.log
           if-no-files-found: ignore
+
