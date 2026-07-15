@@ -183,6 +183,20 @@ jobs:
             exit 1
           fi
 
+      - name: Show libvpx config.log on failure (if present)
+        if: failure()
+        run: |
+          echo "----- searching for libvpx config.log -----"
+          LOG=$(find . -path "*/libvpx/*" -name "config.log" -print -quit 2>/dev/null)
+          if [ -n "$LOG" ]; then
+            echo "Found: $LOG"
+            echo "----- last 200 lines -----"
+            tail -n 200 "$LOG"
+          else
+            echo "No libvpx config.log found (search path: */libvpx/*config.log)"
+            find . -iname "config.log" 2>/dev/null | head -20
+          fi
+
       - name: Show tail of build.log on failure
         if: failure()
         run: |
